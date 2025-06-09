@@ -1,0 +1,148 @@
+def create_auto_detected_icicle_data(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Creates icicle data with automatically detected root tables, with dynamic step detection.
+    Root tables are identified as those that appear as Parents but never as Sources.
+    
+    Args:
+        df: DataFrame containing the flow data
+    
+    Returns:
+        DataFrame formatted for icicle chart visualization
+    """
+    icicle_data = []
+
+    # Get all unique steps and sort them
+    steps = sorted(df['Step'].unique())
+    print(f"Detected steps: {steps}")
+    
+    # Auto-detect root tables (tables that are Parents but never Sources)
+    all_sources = set(df['Source'].unique())
+    all_parents = set(df['Parent'].unique())
+    root_tables = all_parents - all_sources
+    
+    print(f"Auto-detected root tables: {list(root_tables)}")
+    
+    if not root_tables:
+        print("Warning: No clear root tables found. Using highest step parents as roots.")
+        highest_step = steps[-1]
+        highest_step_data = df[df['Step'] == highest_step]
+        root_tables = set(highest_step_data['Parent'].unique())
+    
+    print(f"Using root tables: {list(root_tables)}")
+
+    # Add root nodes for each detected root table
+    for root_table in root_tables:
+        # Get the SourceDB for this root table (from the highest step where it appears as parent)
+        root_sourcedb = 'EDW'  # Default
+        for step in reversed(steps):
+            step_data = df[df['Step'] == step]
+            parent_rows = step_data[step_data['Parent'] == root_table]
+            if len(parent_rows) > 0:
+                # Try to infer the SourceDB from the context
+                root_sourcedb = parent_rows['SourceDB'].iloc[0] if len(parent_rows) > 0 else 'EDW'
+                break
+        
+        icicle_data.append({
+            'ids': root_table,
+            'labels': root_table,
+            'parents': '',
+            'values': 1,
+            'SourceDB': root_sourcedb,
+            'Step': 'Root',
+            'level': 0
+        })
+
+    # Process steps in reverse order (highest to lowest)
+    for level, step in enumerate(reversed(steps), 1):
+        step_data = df[df['Step'] == step]
+        print(f"Processing {step} at level {level}")
+        
+        for _, row in step_data.iterrows():
+            source = row['Source']
+            parent = row['Parent']
+            
+            # Create unique ID for this source at this step
+            unique_id = f"{source}_{step.lower()}"
+            
+            # Determine the parent ID
+            if level == 1:  # Direct children of root tables
+                parent_id = parent  # Use the actual parent name (should be one of the root tables)
+            else:
+                # Find parent from previous level
+                parent_step = steps[len(steps) - level + 1]  # Get the parent step
+                parent_id = f"{parent}_{parent_step.lower()}"
+                
+                # Check if parent exists in the data, if not use the direct parent name
+                parent_exists = any(item['ids'] == parent_id for item in icicle_data)
+                if not parent_exists:
+                    # Try to find the parent in any previous step
+                    for prev_step in steps[len(steps) - level + 1:]:
+                        potential_parent_id = f"{parent}_{prev_step.lower()}"
+                        if any(item['ids'] == potential_parent_id for item in icicle_data):
+                            parent_id = potential_parent_id
+                            break
+                    else:
+                        # If still not found, use the parent name directly
+                        parent_id = parent
+            
+            # Special handling for cases where source might be the same as any root table
+            label = source
+            if source in root_tables and level > 1:
+                label = f"{source} (intermediate)"
+            
+            icicle_data.append({
+                'ids': unique_id,
+                'labels': label,
+                'parents': parent_id,
+                'values': 1,
+                'SourceDB': row['SourceDB'],
+                'Step': step,
+                'level': level
+            })
+
+    return pd.DataFrame(icicle_data)
+
+
+# Create the icicle chart with auto-detected roots
+print("Creating icicle chart with auto-detected root tables:")
+target_df = create_auto_detected_icicle_data(df_table_flow_chart_data)
+print("\nAuto-detected icicle structure:")
+print(target_df[['labels', 'parents', 'SourceDB', 'Step', 'level']].to_string())
+
+# Create the chart with the auto-detected hierarchy
+fig_target = px.icicle(
+    target_df,
+    ids='ids',
+    names='labels',
+    parents='parents',
+    values='values',
+    color='SourceDB',
+    color_discrete_map={
+        'ODS': '#FF6B6B',     # Red for ODS
+        'EDW': '#4ECDC4',     # Teal for EDW
+        'Root': '#95A5A6',    # Gray for root
+    },
+    title='Data Flow Hierarchy - Auto-Detected Root Tables',
+    hover_data=['Step', 'level']
+)
+
+fig_target.update_layout(
+    font_size=11,
+    font_family="Arial",
+    title_font_size=16,
+    title_x=0.5,
+    width=1200,
+    height=700,
+    margin=dict(t=80, l=25, r=25, b=25)
+)
+
+fig_target.update_traces(
+    textinfo="label",
+    hovertemplate='<b>%{label}</b><br>' +
+                  'SourceDB: %{color}<br>' +
+                  'Step: %{customdata[0]}<br>' +
+                  'Level: %{customdata[1]}<br>' +
+                  '<extra></extra>'
+)
+
+fig_target.show()
